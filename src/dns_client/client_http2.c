@@ -118,8 +118,12 @@ static void _dns_client_release_stream_on_error(struct dns_server_info *server_i
 
 	/* Remove from query list and release reference */
 	if (!list_empty(&stream->query_list)) {
-		list_del_init(&stream->query_list);
-		stream->query = NULL;
+		if (stream->query) {
+			pthread_mutex_lock(&stream->query->lock);
+			list_del_init(&stream->query_list);
+			pthread_mutex_unlock(&stream->query->lock);
+			stream->query = NULL;
+		}
 		_dns_client_conn_stream_put(stream);
 	}
 
@@ -211,17 +215,19 @@ static int _dns_client_http2_pending_data(struct dns_conn_stream *stream, struct
 		goto errout;
 	}
 
+	stream->server_info = server_info;
 	if (list_empty(&stream->server_list)) {
 		_dns_client_conn_stream_get(stream);
 		list_add_tail(&stream->server_list, &server_info->conn_stream_list);
 	}
-	stream->server_info = server_info;
 
 	if (list_empty(&stream->query_list)) {
 		_dns_client_conn_stream_get(stream);
+		pthread_mutex_lock(&query->lock);
+		stream->query = query;
 		list_add_tail(&stream->query_list, &query->conn_stream_list);
+		pthread_mutex_unlock(&query->lock);
 	}
-	stream->query = query;
 
 	memset(&event, 0, sizeof(event));
 	event.events = EPOLLIN | EPOLLOUT;
@@ -243,8 +249,12 @@ errout_put:
 		_dns_client_conn_stream_put(stream);
 	}
 	if (!list_empty(&stream->query_list)) {
-		list_del_init(&stream->query_list);
-		stream->query = NULL;
+		if (stream->query) {
+			pthread_mutex_lock(&stream->query->lock);
+			list_del_init(&stream->query_list);
+			pthread_mutex_unlock(&stream->query->lock);
+			stream->query = NULL;
+		}
 		_dns_client_conn_stream_put(stream);
 	}
 	pthread_mutex_unlock(&server_info->lock);
@@ -297,12 +307,14 @@ int _dns_client_send_http2(struct dns_server_info *server_info, struct dns_query
 	/* Now add stream to lists since HTTP/2 stream was successfully created */
 	pthread_mutex_lock(&server_info->lock);
 	_dns_client_conn_stream_get(stream);
-	list_add_tail(&stream->server_list, &server_info->conn_stream_list);
 	stream->server_info = server_info;
+	list_add_tail(&stream->server_list, &server_info->conn_stream_list);
 
 	_dns_client_conn_stream_get(stream);
-	list_add_tail(&stream->query_list, &query->conn_stream_list);
+	pthread_mutex_lock(&query->lock);
 	stream->query = query;
+	list_add_tail(&stream->query_list, &query->conn_stream_list);
+	pthread_mutex_unlock(&query->lock);
 	pthread_mutex_unlock(&server_info->lock);
 
 	/* Flush data immediately */
